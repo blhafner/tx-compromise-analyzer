@@ -1,0 +1,6 @@
+{
+  "description": "Curated Solana drainer program IDs (base58, case-sensitive). Extend as you discover new ones.",
+  "programs": [
+    "4PG6e97DLCn2PRN4ZMmTLg83jsetrDkvamr3JiXoiffa"
+  ]
+}
