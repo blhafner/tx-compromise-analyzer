@@ -102,16 +102,17 @@ export function scoreEvm(input: EvmScoreInput): EvmScoreResult {
   const outbound = explorerTxs.filter((t) => t.from === victimLower && !t.isError)
   const inbound = explorerTxs.filter((t) => t.to === victimLower && t.from !== victimLower)
 
-  // Active EIP-7702 account code delegation (strong drainer signal)
+  // Active EIP-7702 = SRP: persistent account-code delegation (effectively irreversible
+  // without key control) indicates seed/key compromise rather than a one-off phishing approve.
   if (eip7702Delegate) {
     pushEvidence(evidence, {
       id: "eip7702-active-code",
       label: "Active EIP-7702 delegation",
-      detail: `Victim account code is 0xef0100… — currently delegated to ${eip7702Delegate}. Drainers abuse this to execute as the victim without further signatures.`,
-      polarity: "drainer",
+      detail: `Victim account code is 0xef0100… — currently delegated to ${eip7702Delegate}. Active 7702 delegations are classified as SRP compromise (they persist and cannot be removed without key control).`,
+      polarity: "srp",
       weight: 28,
     })
-    drainer += 28
+    srp += 28
   }
 
   const authDelegates = new Set<string>()
@@ -129,11 +130,11 @@ export function scoreEvm(input: EvmScoreInput): EvmScoreResult {
     pushEvidence(evidence, {
       id: "eip7702-type4-txs",
       label: "Type-4 (EIP-7702) transactions",
-      detail: `${type4Count} transaction(s) in window use type 4 / eip7702`,
-      polarity: "drainer",
+      detail: `${type4Count} transaction(s) in window use type 4 / eip7702 — consistent with SRP-style 7702 compromise`,
+      polarity: "srp",
       weight: 16,
     })
-    drainer += 16
+    srp += 16
   }
 
   if (authDelegates.size > 0) {
@@ -143,19 +144,19 @@ export function scoreEvm(input: EvmScoreInput): EvmScoreResult {
       detail: `Delegation target(s) in authorization_list: ${Array.from(authDelegates)
         .slice(0, 3)
         .join(", ")}`,
-      polarity: "drainer",
+      polarity: "srp",
       weight: 20,
     })
-    drainer += 20
+    srp += 20
   } else if (proxyMetaCount > 0 && !eip7702Delegate) {
     pushEvidence(evidence, {
       id: "eip7702-proxy-meta",
       label: "Explorer marks account as EIP-7702 proxy",
       detail: `${proxyMetaCount} transaction(s) show victim as an EIP-7702 proxy account`,
-      polarity: "drainer",
+      polarity: "srp",
       weight: 14,
     })
-    drainer += 14
+    srp += 14
   }
 
   // Label hits
@@ -228,14 +229,25 @@ export function scoreEvm(input: EvmScoreInput): EvmScoreResult {
   }
 
   if (externalPulls.length > 0) {
-    pushEvidence(evidence, {
-      id: "external-pulls",
-      label: "Assets pulled by third party",
-      detail: `${externalPulls.length} token transfer(s) from victim without a matching victim-initiated tx (typical transferFrom drain)`,
-      polarity: "drainer",
-      weight: 20,
-    })
-    drainer += 20
+    if (eip7702Delegate) {
+      pushEvidence(evidence, {
+        id: "external-pulls-under-7702",
+        label: "Token moves while EIP-7702 delegated",
+        detail: `${externalPulls.length} token transfer(s) from victim without a matching EOA-style victim tx — expected under active 7702 (SRP)`,
+        polarity: "srp",
+        weight: 14,
+      })
+      srp += 14
+    } else {
+      pushEvidence(evidence, {
+        id: "external-pulls",
+        label: "Assets pulled by third party",
+        detail: `${externalPulls.length} token transfer(s) from victim without a matching victim-initiated tx (typical transferFrom drain)`,
+        polarity: "drainer",
+        weight: 20,
+      })
+      drainer += 20
+    }
   }
 
   // Focus tx receipt log analysis
@@ -258,17 +270,17 @@ export function scoreEvm(input: EvmScoreInput): EvmScoreResult {
       }
     }
 
-    // EIP-7702 type 4 on focus tx
+    // EIP-7702 type 4 on focus tx → SRP (persistent delegation / key compromise)
     const txType = (focusTx as { type?: string | number }).type
     if (isEip7702Type(txType)) {
       pushEvidence(evidence, {
         id: "eip7702-focus",
         label: "Focus tx is EIP-7702 (type 4)",
-        detail: "Transaction uses type-4 delegation — commonly abused by drainers",
-        polarity: "drainer",
+        detail: "Type-4 delegation transaction — classified as SRP compromise (active 7702 cannot be removed without key control)",
+        polarity: "srp",
         weight: 18,
       })
-      drainer += 18
+      srp += 18
     }
 
     const focusAuth = (
@@ -282,10 +294,10 @@ export function scoreEvm(input: EvmScoreInput): EvmScoreResult {
         id: "eip7702-focus-auth",
         label: "Focus tx sets EIP-7702 authorization",
         detail: `Delegates to: ${targets.slice(0, 3).join(", ") || "(see explorer)"}`,
-        polarity: "drainer",
+        polarity: "srp",
         weight: 22,
       })
-      drainer += 22
+      srp += 22
     }
 
     let approvalLogs = 0
@@ -353,91 +365,63 @@ export function scoreEvm(input: EvmScoreInput): EvmScoreResult {
     const dripBeforeSweep = dripTimes.some((d) => d <= earliestSweep + 3600)
 
     if (dripBeforeSweep) {
-      // Under active 7702, "sweeps" are often the delegate draining — count as drainer-leaning
-      if (eip7702Delegate) {
-        pushEvidence(evidence, {
-          id: "gas-drip-under-7702",
-          label: "Funding then outbound under EIP-7702",
-          detail: `Inbound gas/funding then ${sweepOutbound.length} outbound move(s) while account is delegated — typical 7702 drain pattern (not classic SRP)`,
-          polarity: "drainer",
-          weight: 16,
-        })
-        drainer += 16
-      } else {
-        pushEvidence(evidence, {
-          id: "gas-drip",
-          label: "Gas drip then sweep",
-          detail: `${smallInbound.length} small inbound native transfer(s) followed by ${sweepOutbound.length} outbound sweep(s)`,
-          polarity: "srp",
-          weight: 22,
-        })
-        srp += 22
-      }
+      pushEvidence(evidence, {
+        id: eip7702Delegate ? "gas-drip-under-7702" : "gas-drip",
+        label: eip7702Delegate
+          ? "Funding then outbound under EIP-7702"
+          : "Gas drip then sweep",
+        detail: eip7702Delegate
+          ? `Inbound funding then ${sweepOutbound.length} outbound move(s) while account is 7702-delegated — SRP compromise pattern`
+          : `${smallInbound.length} small inbound native transfer(s) followed by ${sweepOutbound.length} outbound sweep(s)`,
+        polarity: "srp",
+        weight: 22,
+      })
+      srp += 22
     }
   }
 
   if (nativeOutCount >= 2 && contractCallCount === 0) {
-    if (eip7702Delegate) {
-      pushEvidence(evidence, {
-        id: "native-sweeps-under-7702",
-        label: "Native sends while EIP-7702 delegated",
-        detail: `${nativeOutCount} native send(s) from a delegated account — can be initiated by the delegate contract, not a seed compromise`,
-        polarity: "drainer",
-        weight: 12,
-      })
-      drainer += 12
-    } else {
-      pushEvidence(evidence, {
-        id: "native-only-sweeps",
-        label: "Simple native transfers only",
-        detail: `${nativeOutCount} native send(s) with no contract calls — typical of key compromise sweeps`,
-        polarity: "srp",
-        weight: 14,
-      })
-      srp += 14
-    }
+    pushEvidence(evidence, {
+      id: eip7702Delegate ? "native-sweeps-under-7702" : "native-only-sweeps",
+      label: eip7702Delegate
+        ? "Native sends while EIP-7702 delegated"
+        : "Simple native transfers only",
+      detail: eip7702Delegate
+        ? `${nativeOutCount} native send(s) from a 7702-delegated account — consistent with SRP compromise sweeps`
+        : `${nativeOutCount} native send(s) with no contract calls — typical of key compromise sweeps`,
+      polarity: "srp",
+      weight: 14,
+    })
+    srp += 14
   }
 
   if (transferOutCount >= 1 && approveCount === 0 && externalPulls.length === 0) {
-    if (!eip7702Delegate) {
-      pushEvidence(evidence, {
-        id: "token-transfers",
-        label: "Direct ERC-20 transfer() calls",
-        detail: `${transferOutCount} transfer() from victim (not transferFrom)`,
-        polarity: "srp",
-        weight: 12,
-      })
-      srp += 12
-    }
+    pushEvidence(evidence, {
+      id: "token-transfers",
+      label: "Direct ERC-20 transfer() calls",
+      detail: `${transferOutCount} transfer() from victim (not transferFrom)`,
+      polarity: "srp",
+      weight: 12,
+    })
+    srp += 12
   }
 
   const topCollectors = Array.from(collectors.entries()).sort(
     (a, b) => b[1] - a[1]
   )
   if (topCollectors.length > 0 && topCollectors.length <= 2 && (nativeOutCount + transferOutCount) >= 2) {
-    if (eip7702Delegate) {
-      pushEvidence(evidence, {
-        id: "few-collectors-under-7702",
-        label: "Assets to few collectors under EIP-7702",
-        detail: `Delegated account swept to ${topCollectors.length} address(es): ${topCollectors
-          .map(([a, n]) => `${a.slice(0, 10)}…(${n})`)
-          .join(", ")}`,
-        polarity: "drainer",
-        weight: 8,
-      })
-      drainer += 8
-    } else {
-      pushEvidence(evidence, {
-        id: "few-collectors",
-        label: "Funds to few collector EOAs",
-        detail: `Assets concentrated to ${topCollectors.length} address(es): ${topCollectors
-          .map(([a, n]) => `${a.slice(0, 10)}…(${n})`)
-          .join(", ")}`,
-        polarity: "srp",
-        weight: 10,
-      })
-      srp += 10
-    }
+    pushEvidence(evidence, {
+      id: eip7702Delegate ? "few-collectors-under-7702" : "few-collectors",
+      label: eip7702Delegate
+        ? "Assets to few collectors under EIP-7702"
+        : "Funds to few collector EOAs",
+      detail: `Assets concentrated to ${topCollectors.length} address(es): ${topCollectors
+        .map(([a, n]) => `${a.slice(0, 10)}…(${n})`)
+        .join(", ")}`,
+      polarity: "srp",
+      weight: 10,
+    })
+    srp += 10
   }
 
   if (nativeBalance === BigInt(0) && (nativeOutCount > 0 || transferOutCount > 0 || victimTokenOut.length > 0)) {
