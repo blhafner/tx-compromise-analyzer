@@ -8,7 +8,13 @@ Local web tool that classifies an EVM or Solana **address** or **transaction** a
 
 Supported networks: Ethereum, Base, Polygon, Arbitrum, BSC, Optimism, Robinhood Chain (4663), Arc (5042), Solana.
 
-## Setup
+## Live demo
+
+**https://tx-compromise-analyzer.vercel.app**
+
+GitHub Pages can’t host the Next.js API routes, so the shareable demo runs on Vercel (linked to this repo; pushes redeploy).
+
+## Setup (local)
 
 ```bash
 pnpm install
