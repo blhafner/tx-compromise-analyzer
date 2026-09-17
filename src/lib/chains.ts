@@ -45,7 +45,10 @@ export interface EvmChainConfig {
   chain: Chain
   explorerUrl: string
   etherscanSupported: boolean
+  /** Legacy Etherscan-compatible Blockscout `/api` */
   blockscoutApi?: string
+  /** Blockscout REST API v2 base, e.g. https://base.blockscout.com */
+  blockscoutV2?: string
   defaultRpc: string
   envRpcKey: string
 }
@@ -58,6 +61,7 @@ export const EVM_CHAINS: EvmChainConfig[] = [
     chain: mainnet,
     explorerUrl: "https://etherscan.io",
     etherscanSupported: true,
+    blockscoutV2: "https://eth.blockscout.com",
     defaultRpc: "https://cloudflare-eth.com",
     envRpcKey: "RPC_ETHEREUM",
   },
@@ -68,6 +72,7 @@ export const EVM_CHAINS: EvmChainConfig[] = [
     chain: base,
     explorerUrl: "https://basescan.org",
     etherscanSupported: true,
+    blockscoutV2: "https://base.blockscout.com",
     defaultRpc: "https://mainnet.base.org",
     envRpcKey: "RPC_BASE",
   },
@@ -78,6 +83,7 @@ export const EVM_CHAINS: EvmChainConfig[] = [
     chain: polygon,
     explorerUrl: "https://polygonscan.com",
     etherscanSupported: true,
+    blockscoutV2: "https://polygon.blockscout.com",
     defaultRpc: "https://polygon-rpc.com",
     envRpcKey: "RPC_POLYGON",
   },
@@ -88,6 +94,7 @@ export const EVM_CHAINS: EvmChainConfig[] = [
     chain: arbitrum,
     explorerUrl: "https://arbiscan.io",
     etherscanSupported: true,
+    blockscoutV2: "https://arbitrum.blockscout.com",
     defaultRpc: "https://arb1.arbitrum.io/rpc",
     envRpcKey: "RPC_ARBITRUM",
   },
@@ -108,6 +115,7 @@ export const EVM_CHAINS: EvmChainConfig[] = [
     chain: optimism,
     explorerUrl: "https://optimistic.etherscan.io",
     etherscanSupported: true,
+    blockscoutV2: "https://optimism.blockscout.com",
     defaultRpc: "https://mainnet.optimism.io",
     envRpcKey: "RPC_OPTIMISM",
   },
@@ -119,6 +127,7 @@ export const EVM_CHAINS: EvmChainConfig[] = [
     explorerUrl: "https://robinhoodchain.blockscout.com",
     etherscanSupported: false,
     blockscoutApi: "https://robinhoodchain.blockscout.com/api",
+    blockscoutV2: "https://robinhoodchain.blockscout.com",
     defaultRpc: "https://rpc.mainnet.chain.robinhood.com",
     envRpcKey: "RPC_ROBINHOOD",
   },
@@ -130,6 +139,7 @@ export const EVM_CHAINS: EvmChainConfig[] = [
     explorerUrl: "https://explorer.arc.io",
     etherscanSupported: false,
     blockscoutApi: "https://explorer.arc.io/api",
+    blockscoutV2: "https://explorer.arc.io",
     defaultRpc: "https://rpc.mainnet.arc.io",
     envRpcKey: "RPC_ARC",
   },

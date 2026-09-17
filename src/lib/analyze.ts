@@ -11,6 +11,7 @@ import {
   enrichTxs,
   fetchAddressHistory,
   findTxAcrossChains,
+  getEip7702Delegation,
   getNativeBalance,
   windowAroundNonce,
 } from "./evm/fetch"
@@ -81,11 +82,14 @@ async function analyzeEvm(
     }
 
     const enriched = await enrichTxs(config, window, raw)
+    const eip7702Delegate = await getEip7702Delegation(config, victim)
     const counterparties = [
       victim,
       ...(tx.to ? [tx.to.toLowerCase()] : []),
+      ...(eip7702Delegate ? [eip7702Delegate] : []),
       ...window.map((t) => t.to).filter(Boolean),
       ...window.map((t) => t.from).filter(Boolean),
+      ...window.flatMap((t) => t.authorizationDelegates ?? []),
     ]
     const labels = await checkEvmLabels(counterparties)
     const nativeBalance = await getNativeBalance(config, victim)
@@ -100,6 +104,7 @@ async function analyzeEvm(
       focusTx: tx,
       focusReceipt: receipt,
       nativeBalance,
+      eip7702Delegate,
     })
 
     return {
@@ -182,9 +187,12 @@ async function analyzeEvm(
   if (window.length < 5) window = history
 
   const enriched = await enrichTxs(config, window)
+  const eip7702Delegate = await getEip7702Delegation(config, raw)
   const counterparties = [
     raw.toLowerCase(),
+    ...(eip7702Delegate ? [eip7702Delegate] : []),
     ...window.flatMap((t) => [t.from, t.to]).filter(Boolean),
+    ...window.flatMap((t) => t.authorizationDelegates ?? []),
   ]
   const labels = await checkEvmLabels(counterparties)
   const nativeBalance = await getNativeBalance(config, raw)
@@ -197,6 +205,7 @@ async function analyzeEvm(
     tokens,
     labels,
     nativeBalance,
+    eip7702Delegate,
   })
 
   return {

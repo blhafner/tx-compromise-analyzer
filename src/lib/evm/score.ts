@@ -13,6 +13,7 @@ import {
 import type { EnrichedTx, ExplorerTx, TokenTransfer } from "./fetch"
 import type { LabelHit } from "../types"
 import type { Transaction, TransactionReceipt } from "viem"
+import { isEip7702Type } from "./eip7702"
 
 export interface EvmScoreInput {
   config: EvmChainConfig
@@ -24,6 +25,8 @@ export interface EvmScoreInput {
   focusTx?: Transaction
   focusReceipt?: TransactionReceipt
   nativeBalance: bigint
+  /** Active EIP-7702 delegate from eth_getCode (0xef0100||address) */
+  eip7702Delegate?: string
 }
 
 export interface EvmScoreResult {
@@ -79,8 +82,17 @@ function scoreToVerdict(
 }
 
 export function scoreEvm(input: EvmScoreInput): EvmScoreResult {
-  const { config, victim, explorerTxs, tokens, labels, focusTx, focusReceipt, nativeBalance } =
-    input
+  const {
+    config,
+    victim,
+    explorerTxs,
+    tokens,
+    labels,
+    focusTx,
+    focusReceipt,
+    nativeBalance,
+    eip7702Delegate,
+  } = input
   const evidence: EvidenceItem[] = []
   let drainer = 0
   let srp = 0
@@ -89,6 +101,62 @@ export function scoreEvm(input: EvmScoreInput): EvmScoreResult {
   const victimLower = victim.toLowerCase()
   const outbound = explorerTxs.filter((t) => t.from === victimLower && !t.isError)
   const inbound = explorerTxs.filter((t) => t.to === victimLower && t.from !== victimLower)
+
+  // Active EIP-7702 account code delegation (strong drainer signal)
+  if (eip7702Delegate) {
+    pushEvidence(evidence, {
+      id: "eip7702-active-code",
+      label: "Active EIP-7702 delegation",
+      detail: `Victim account code is 0xef0100… — currently delegated to ${eip7702Delegate}. Drainers abuse this to execute as the victim without further signatures.`,
+      polarity: "drainer",
+      weight: 28,
+    })
+    drainer += 28
+  }
+
+  const authDelegates = new Set<string>()
+  let type4Count = 0
+  let proxyMetaCount = 0
+  for (const t of explorerTxs) {
+    if (isEip7702Type(t.txType)) type4Count++
+    if (t.fromIsEip7702Proxy && t.from === victimLower) proxyMetaCount++
+    for (const d of t.authorizationDelegates ?? []) {
+      authDelegates.add(d)
+    }
+  }
+
+  if (type4Count > 0) {
+    pushEvidence(evidence, {
+      id: "eip7702-type4-txs",
+      label: "Type-4 (EIP-7702) transactions",
+      detail: `${type4Count} transaction(s) in window use type 4 / eip7702`,
+      polarity: "drainer",
+      weight: 16,
+    })
+    drainer += 16
+  }
+
+  if (authDelegates.size > 0) {
+    pushEvidence(evidence, {
+      id: "eip7702-auth-list",
+      label: "EIP-7702 authorization list",
+      detail: `Delegation target(s) in authorization_list: ${Array.from(authDelegates)
+        .slice(0, 3)
+        .join(", ")}`,
+      polarity: "drainer",
+      weight: 20,
+    })
+    drainer += 20
+  } else if (proxyMetaCount > 0 && !eip7702Delegate) {
+    pushEvidence(evidence, {
+      id: "eip7702-proxy-meta",
+      label: "Explorer marks account as EIP-7702 proxy",
+      detail: `${proxyMetaCount} transaction(s) show victim as an EIP-7702 proxy account`,
+      polarity: "drainer",
+      weight: 14,
+    })
+    drainer += 14
+  }
 
   // Label hits
   for (const hit of labels) {
@@ -190,17 +258,34 @@ export function scoreEvm(input: EvmScoreInput): EvmScoreResult {
       }
     }
 
-    // EIP-7702 type 4
+    // EIP-7702 type 4 on focus tx
     const txType = (focusTx as { type?: string | number }).type
-    if (txType === 4 || txType === "eip7702") {
+    if (isEip7702Type(txType)) {
       pushEvidence(evidence, {
-        id: "eip7702",
-        label: "EIP-7702 delegation",
-        detail: "Transaction uses type-4 delegation — often abused by drainers",
+        id: "eip7702-focus",
+        label: "Focus tx is EIP-7702 (type 4)",
+        detail: "Transaction uses type-4 delegation — commonly abused by drainers",
         polarity: "drainer",
         weight: 18,
       })
       drainer += 18
+    }
+
+    const focusAuth = (
+      focusTx as { authorizationList?: { address?: string; authority?: string }[] }
+    ).authorizationList
+    if (Array.isArray(focusAuth) && focusAuth.length > 0) {
+      const targets = focusAuth
+        .map((a) => (a.address || a.authority || "").toLowerCase())
+        .filter(Boolean)
+      pushEvidence(evidence, {
+        id: "eip7702-focus-auth",
+        label: "Focus tx sets EIP-7702 authorization",
+        detail: `Delegates to: ${targets.slice(0, 3).join(", ") || "(see explorer)"}`,
+        polarity: "drainer",
+        weight: 22,
+      })
+      drainer += 22
     }
 
     let approvalLogs = 0
@@ -268,53 +353,91 @@ export function scoreEvm(input: EvmScoreInput): EvmScoreResult {
     const dripBeforeSweep = dripTimes.some((d) => d <= earliestSweep + 3600)
 
     if (dripBeforeSweep) {
-      pushEvidence(evidence, {
-        id: "gas-drip",
-        label: "Gas drip then sweep",
-        detail: `${smallInbound.length} small inbound native transfer(s) followed by ${sweepOutbound.length} outbound sweep(s)`,
-        polarity: "srp",
-        weight: 22,
-      })
-      srp += 22
+      // Under active 7702, "sweeps" are often the delegate draining — count as drainer-leaning
+      if (eip7702Delegate) {
+        pushEvidence(evidence, {
+          id: "gas-drip-under-7702",
+          label: "Funding then outbound under EIP-7702",
+          detail: `Inbound gas/funding then ${sweepOutbound.length} outbound move(s) while account is delegated — typical 7702 drain pattern (not classic SRP)`,
+          polarity: "drainer",
+          weight: 16,
+        })
+        drainer += 16
+      } else {
+        pushEvidence(evidence, {
+          id: "gas-drip",
+          label: "Gas drip then sweep",
+          detail: `${smallInbound.length} small inbound native transfer(s) followed by ${sweepOutbound.length} outbound sweep(s)`,
+          polarity: "srp",
+          weight: 22,
+        })
+        srp += 22
+      }
     }
   }
 
   if (nativeOutCount >= 2 && contractCallCount === 0) {
-    pushEvidence(evidence, {
-      id: "native-only-sweeps",
-      label: "Simple native transfers only",
-      detail: `${nativeOutCount} native send(s) with no contract calls — typical of key compromise sweeps`,
-      polarity: "srp",
-      weight: 14,
-    })
-    srp += 14
+    if (eip7702Delegate) {
+      pushEvidence(evidence, {
+        id: "native-sweeps-under-7702",
+        label: "Native sends while EIP-7702 delegated",
+        detail: `${nativeOutCount} native send(s) from a delegated account — can be initiated by the delegate contract, not a seed compromise`,
+        polarity: "drainer",
+        weight: 12,
+      })
+      drainer += 12
+    } else {
+      pushEvidence(evidence, {
+        id: "native-only-sweeps",
+        label: "Simple native transfers only",
+        detail: `${nativeOutCount} native send(s) with no contract calls — typical of key compromise sweeps`,
+        polarity: "srp",
+        weight: 14,
+      })
+      srp += 14
+    }
   }
 
   if (transferOutCount >= 1 && approveCount === 0 && externalPulls.length === 0) {
-    pushEvidence(evidence, {
-      id: "token-transfers",
-      label: "Direct ERC-20 transfer() calls",
-      detail: `${transferOutCount} transfer() from victim (not transferFrom)`,
-      polarity: "srp",
-      weight: 12,
-    })
-    srp += 12
+    if (!eip7702Delegate) {
+      pushEvidence(evidence, {
+        id: "token-transfers",
+        label: "Direct ERC-20 transfer() calls",
+        detail: `${transferOutCount} transfer() from victim (not transferFrom)`,
+        polarity: "srp",
+        weight: 12,
+      })
+      srp += 12
+    }
   }
 
   const topCollectors = Array.from(collectors.entries()).sort(
     (a, b) => b[1] - a[1]
   )
   if (topCollectors.length > 0 && topCollectors.length <= 2 && (nativeOutCount + transferOutCount) >= 2) {
-    pushEvidence(evidence, {
-      id: "few-collectors",
-      label: "Funds to few collector EOAs",
-      detail: `Assets concentrated to ${topCollectors.length} address(es): ${topCollectors
-        .map(([a, n]) => `${a.slice(0, 10)}…(${n})`)
-        .join(", ")}`,
-      polarity: "srp",
-      weight: 10,
-    })
-    srp += 10
+    if (eip7702Delegate) {
+      pushEvidence(evidence, {
+        id: "few-collectors-under-7702",
+        label: "Assets to few collectors under EIP-7702",
+        detail: `Delegated account swept to ${topCollectors.length} address(es): ${topCollectors
+          .map(([a, n]) => `${a.slice(0, 10)}…(${n})`)
+          .join(", ")}`,
+        polarity: "drainer",
+        weight: 8,
+      })
+      drainer += 8
+    } else {
+      pushEvidence(evidence, {
+        id: "few-collectors",
+        label: "Funds to few collector EOAs",
+        detail: `Assets concentrated to ${topCollectors.length} address(es): ${topCollectors
+          .map(([a, n]) => `${a.slice(0, 10)}…(${n})`)
+          .join(", ")}`,
+        polarity: "srp",
+        weight: 10,
+      })
+      srp += 10
+    }
   }
 
   if (nativeBalance === BigInt(0) && (nativeOutCount > 0 || transferOutCount > 0 || victimTokenOut.length > 0)) {
